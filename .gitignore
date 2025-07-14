@@ -1,0 +1,188 @@
+# RetinoG - Gitignore for Google Gemma Hackathon
+# =================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+retinoblastoma-env/
+retinoblastoma_env/
+
+# Environment variables (CRITICAL - contains API keys)
+.env
+.env.local
+.env.production
+.env.staging
+.env.development
+*.env
+
+# Models (IMPORTANT - Don't commit large model files)
+models/
+!models/.gitkeep
+!models/README.md
+*.bin
+*.safetensors
+*.ckpt
+*.pth
+*.pkl
+*.h5
+*.model
+gemma-3n/
+gemma-3n-transform*/
+*.gguf
+*.onnx
+
+# Kaggle credentials and downloads
+.kaggle/
+kaggle.json
+*.zip
+*.tar.gz
+*.tar
+
+# Data directories (keep structure, not content)
+data/results/
+data/test_images/
+!data/results/.gitkeep
+!data/test_images/.gitkeep
+!data/test_images/README.md
+train_data/
+!train_data/.gitkeep
+
+# Logs and outputs
+*.log
+logs/
+log/
+*.out
+*.err
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Testing
+.coverage
+.pytest_cache/
+.tox/
+.nox/
+htmlcov/
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Profiling
+.prof
+
+# PyCharm
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Mobile development
+*.apk
+*.ipa
+*.app
+android/
+ios/
+node_modules/
+*.expo/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Large datasets and media
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wav
+*.mp3
+datasets/
+large_files/
+
+# Performance monitoring
+*.prof
+*.cprof
+
+# Cache directories
+.cache/
+.npm/
+.yarn/
+
+# Custom project specific
+face_database.pkl
+face_history.json
+analysis_*.json
+benchmark_*.json
+test_report_*.json
+performance_report_*.json
+diagnostics_*.json
+
+# Keep important structure files
+!.gitkeep
+!README.md
+!requirements.txt
+!setup_script.py
