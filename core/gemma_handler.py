@@ -1,920 +1,562 @@
 """
-Gestionnaire Gemma 3n optimisé avec Google AI Edge
-Architecture hybride pour performance maximale sur device
+Gestionnaire spécialisé pour Gemma 3n multimodal
+Résout les problèmes de mémoire GPU et utilise les capacités vision
 """
 import torch
 import numpy as np
 from PIL import Image
-import base64
-import io
-import json
 import logging
+import json
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union
-import cv2
-from dataclasses import dataclass
-from enum import Enum
-
-# Google AI Edge imports (adaptés selon disponibilité)
-try:
-    import google.generativeai as genai
-    from google.generativeai.types import HarmCategory, HarmBlockThreshold
-    GOOGLE_AI_AVAILABLE = True
-except ImportError:
-    GOOGLE_AI_AVAILABLE = False
-    logging.warning("Google AI non disponible, utilisation du mode local")
-
-# Transformers pour Gemma local
-try:
-    from transformers import (
-        AutoTokenizer, AutoModelForCausalLM, 
-        pipeline, AutoProcessor
-    )
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
-
-from config.settings import *
+from typing import Dict, Optional, Tuple
+import warnings
+warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
 
-class ModelBackend(Enum):
-    """Types de backend disponibles"""
-    GOOGLE_AI_EDGE = "google_ai_edge"
-    LOCAL_TRANSFORMERS = "local_transformers"
-    HYBRID = "hybrid"
-    SIMULATION = "simulation"
-
-@dataclass
-class AnalysisResult:
-    """Structure standardisée des résultats d'analyse"""
-    leukocoria_detected: bool
-    confidence: float
-    risk_level: str
-    pupil_color: str
-    description: str
-    recommendations: str
-    processing_time: float
-    model_backend: str
-    technical_details: Dict = None
-
-class GemmaHandler:
-    """Gestionnaire Gemma 3n optimisé pour Google AI Edge Prize"""
+class Gemma3nMultimodalHandler:
+    """Gestionnaire optimisé pour Gemma 3n multimodal avec vision"""
     
-    def __init__(self):
+    def __init__(self, model_path: Path):
+        self.model_path = model_path
+        self.model = None
+        self.tokenizer = None
+        self.processor = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.backend = self._determine_best_backend()
+        self.initialized = False
         
-        # Modèles et configurations
-        self.local_model = None
-        self.local_tokenizer = None
-        self.google_model = None
+        logger.info(f"Initializing Gemma 3n Multimodal Handler")
+        logger.info(f"Device: {self.device}")
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
         
-        # Cache et optimisations
-        self.analysis_cache = {}
-        self.performance_metrics = {
-            'total_analyses': 0,
-            'average_processing_time': 0,
-            'cache_hits': 0,
-            'backend_usage': {backend.value: 0 for backend in ModelBackend}
-        }
-        
-        # Initialisation
-        self._initialize_backend()
-        self._setup_medical_prompts()
+        if torch.cuda.is_available():
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            logger.info(f"GPU Memory: {gpu_memory:.1f} GB")
     
-    def _determine_best_backend(self) -> ModelBackend:
-        """Détermine le meilleur backend selon l'environnement"""
-        if GOOGLE_API_KEY and GOOGLE_AI_AVAILABLE:
-            logger.info("🌐 Google AI Edge détecté - Mode hybride activé")
-            return ModelBackend.HYBRID
-        elif TRANSFORMERS_AVAILABLE and GEMMA_LOCAL_PATH.exists():
-            logger.info("💻 Modèle local détecté - Mode transformers")
-            return ModelBackend.LOCAL_TRANSFORMERS
-        else:
-            logger.warning("⚠️ Mode simulation - Fonctionnalité limitée")
-            return ModelBackend.SIMULATION
-    
-    def _initialize_backend(self):
-        """Initialise le(s) backend(s) disponible(s)"""
+    def load_model_optimized(self, progress_callback=None):
+        """Charge le modèle avec optimisations mémoire"""
         try:
-            if self.backend in [ModelBackend.GOOGLE_AI_EDGE, ModelBackend.HYBRID]:
-                self._setup_google_ai_edge()
+            if progress_callback:
+                progress_callback(10, "Importing libraries...")
             
-            if self.backend in [ModelBackend.LOCAL_TRANSFORMERS, ModelBackend.HYBRID]:
-                self._setup_local_transformers()
-                
-            logger.info(f"✅ Backend initialisé: {self.backend.value}")
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur d'initialisation: {e}")
-            self.backend = ModelBackend.SIMULATION
-    
-    def _setup_google_ai_edge(self):
-        """Configure Google AI Edge pour performances optimales"""
-        if not GOOGLE_AI_AVAILABLE:
-            return
-        
-        try:
-            # Configuration Google AI avec paramètres optimisés
-            genai.configure(api_key=GOOGLE_API_KEY)
-            
-            # Configuration du modèle pour usage médical
-            generation_config = {
-                "temperature": 0.1,  # Très faible pour cohérence médicale
-                "top_p": 0.8,
-                "top_k": 20,
-                "max_output_tokens": 512,
-                "response_mime_type": "application/json",
-            }
-            
-            # Paramètres de sécurité pour contenu médical
-            safety_settings = {
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
-            
-            # Initialiser le modèle
-            self.google_model = genai.GenerativeModel(
-                model_name="gemini-1.5-pro",  # Sera remplacé par gemma-3n
-                generation_config=generation_config,
-                safety_settings=safety_settings,
-                system_instruction=self._get_medical_system_prompt()
+            from transformers import (
+                AutoTokenizer, AutoModelForCausalLM, AutoProcessor,
+                BitsAndBytesConfig
             )
+            import accelerate
             
-            logger.info("✅ Google AI Edge configuré")
+            if progress_callback:
+                progress_callback(20, "Loading tokenizer...")
             
-        except Exception as e:
-            logger.error(f"❌ Erreur Google AI Edge: {e}")
-            raise
-    
-    def _setup_local_transformers(self):
-        """Configure le modèle local Transformers"""
-        if not TRANSFORMERS_AVAILABLE:
-            return
-        
-        try:
-            model_path = str(GEMMA_LOCAL_PATH)
-            
-            logger.info(f"🔄 Chargement du modèle local: {model_path}")
-            
-            # Configuration optimisée pour inférence
-            model_kwargs = {
-                "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
-                "device_map": "auto" if torch.cuda.is_available() else None,
-                "trust_remote_code": True,
-                "low_cpu_mem_usage": True,
-            }
-            
-            # Chargement du tokenizer
-            self.local_tokenizer = AutoTokenizer.from_pretrained(
-                model_path,
+            # Charger le tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                str(self.model_path),
                 trust_remote_code=True,
                 padding_side="left"
             )
             
-            # Chargement du modèle
-            self.local_model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                **model_kwargs
-            )
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
             
-            # Optimisations pour inférence
+            if progress_callback:
+                progress_callback(40, "Loading processor...")
+            
+            # Charger le processor pour les images
+            try:
+                self.processor = AutoProcessor.from_pretrained(
+                    str(self.model_path),
+                    trust_remote_code=True
+                )
+                logger.info("✅ Processor loaded for multimodal capabilities")
+            except Exception as e:
+                logger.warning(f"No processor found, using tokenizer only: {e}")
+                self.processor = None
+            
+            if progress_callback:
+                progress_callback(60, "Configuring model loading...")
+            
+            # Configuration optimisée pour votre GTX 1650 (4GB VRAM)
+            model_kwargs = {
+                "trust_remote_code": True,
+                "torch_dtype": torch.float16,  # Réduire l'usage mémoire
+                "low_cpu_mem_usage": True,
+                "device_map": "auto",
+                "max_memory": {0: "3GB"},  # Limiter à 3GB pour votre GTX 1650
+                "offload_folder": "offload_temp",  # Dossier temporaire pour offload
+            }
+            
+            # Alternative: Quantification 8-bit si problème de mémoire
+            try:
+                if progress_callback:
+                    progress_callback(70, "Loading model (may take several minutes)...")
+                
+                # Essayer d'abord le chargement normal
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    str(self.model_path),
+                    **model_kwargs
+                )
+                
+            except Exception as e:
+                logger.warning(f"Normal loading failed: {e}")
+                logger.info("Trying with 8-bit quantization...")
+                
+                if progress_callback:
+                    progress_callback(75, "Loading with 8-bit quantization...")
+                
+                # Configuration 8-bit pour économiser la mémoire
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                    llm_int8_threshold=6.0,
+                    llm_int8_has_fp16_weight=False,
+                )
+                
+                model_kwargs.update({
+                    "quantization_config": quantization_config,
+                    "device_map": "auto",
+                    "max_memory": {0: "3GB", "cpu": "8GB"}
+                })
+                
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    str(self.model_path),
+                    **model_kwargs
+                )
+            
+            if progress_callback:
+                progress_callback(90, "Optimizing model...")
+            
+            # Optimisations finales
+            self.model.eval()
+            
+            # Vider le cache GPU
             if torch.cuda.is_available():
-                self.local_model = self.local_model.half()
+                torch.cuda.empty_cache()
             
-            self.local_model.eval()
+            if progress_callback:
+                progress_callback(100, "Model ready!")
             
-            # Configuration du pad token si nécessaire
-            if self.local_tokenizer.pad_token is None:
-                self.local_tokenizer.pad_token = self.local_tokenizer.eos_token
-            
-            logger.info("✅ Modèle local chargé et optimisé")
+            self.initialized = True
+            logger.info("✅ Gemma 3n Multimodal loaded successfully")
+            return True
             
         except Exception as e:
-            logger.error(f"❌ Erreur modèle local: {e}")
-            raise
+            logger.error(f"Failed to load Gemma 3n: {e}")
+            return False
     
-    def _setup_medical_prompts(self):
-        """Configure les prompts spécialisés pour l'analyse médicale"""
-        self.medical_prompts = {
-            "system": self._get_medical_system_prompt(),
-            "analysis": self._get_analysis_prompt_template(),
-            "batch": self._get_batch_analysis_prompt()
-        }
-    
-    def _get_medical_system_prompt(self) -> str:
-        """Prompt système optimisé pour l'analyse médicale"""
-        return """You are a specialized AI assistant for retinoblastoma screening through leukocoria detection.
-
-MEDICAL CONTEXT:
-- Retinoblastoma is a rare but serious eye cancer in children
-- Leukocoria (white pupil reflex) is the most common early sign
-- Early detection saves lives and preserves vision
-- 95% survival rate with early detection vs 30% when late
-
-ANALYSIS GUIDELINES:
-1. Focus specifically on white or abnormal pupil reflexes
-2. Consider lighting conditions and image quality
-3. Distinguish pathological from physiological leukocoria
-4. Provide confidence levels and clear recommendations
-5. Always emphasize need for professional medical evaluation
-
-RESPONSE FORMAT:
-Always respond in valid JSON with these exact fields:
-{
-  "leukocoria_detected": boolean,
-  "confidence": float (0-100),
-  "risk_level": "low|medium|high",
-  "pupil_color": "description",
-  "description": "detailed observation",
-  "recommendations": "medical guidance",
-  "technical_details": {
-    "image_quality": "assessment",
-    "lighting_conditions": "assessment",
-    "pupil_visibility": "assessment"
-  }
-}"""
-    
-    def _get_analysis_prompt_template(self) -> str:
-        """Template pour l'analyse d'une région oculaire"""
-        return """Analyze this eye region image for signs of leukocoria (white pupil reflex) that may indicate retinoblastoma.
-
-EYE POSITION: {eye_position}
-IMAGE QUALITY: {image_quality}
-
-SPECIFIC ANALYSIS REQUIRED:
-1. Examine the pupil for any white, gray, or abnormal coloration
-2. Assess if the reflection appears pathological vs physiological
-3. Consider the image lighting and angle
-4. Evaluate the overall visibility and image quality
-
-CLINICAL CONTEXT:
-- This is a screening tool for early detection
-- False positives are preferable to false negatives
-- Any concerning findings warrant immediate medical evaluation
-- Consider the child's age and typical presentation patterns
-
-Please provide a detailed analysis in the specified JSON format."""
-    
-    def _get_batch_analysis_prompt(self) -> str:
-        """Prompt pour l'analyse en lot"""
-        return """Analyze multiple eye regions from the same individual for consistency in leukocoria detection.
-
-INSTRUCTIONS:
-1. Analyze each eye region individually
-2. Look for consistent patterns across images
-3. Consider temporal progression if timestamps available
-4. Provide overall risk assessment
-5. Recommend urgency level for medical consultation
-
-Focus on:
-- Consistency of findings across multiple images
-- Progressive changes over time
-- Bilateral vs unilateral presentation
-- Image quality variations"""
-    
-    def analyze_eye_region(self, eye_image: Image.Image, 
-                          eye_position: str = "unknown",
-                          use_cache: bool = True,
-                          force_backend: Optional[ModelBackend] = None) -> AnalysisResult:
-        """
-        Analyse avancée d'une région oculaire avec optimisations Edge
-        
-        Args:
-            eye_image: Image PIL de la région oculaire
-            eye_position: Position de l'œil ("left", "right", "unknown")
-            use_cache: Utiliser le cache pour accélérer
-            force_backend: Forcer un backend spécifique
-            
-        Returns:
-            AnalysisResult avec tous les détails
-        """
-        start_time = time.time()
+    def analyze_eye_image_multimodal(self, image_pil: Image.Image, eye_position: str = "unknown") -> Dict:
+        """Analyse multimodale avec image + texte"""
+        if not self.initialized:
+            return self._create_fallback_result("Model not initialized")
         
         try:
-            # Vérification du cache
-            if use_cache:
-                cache_key = self._generate_cache_key(eye_image, eye_position)
-                if cache_key in self.analysis_cache:
-                    self.performance_metrics['cache_hits'] += 1
-                    cached_result = self.analysis_cache[cache_key]
-                    cached_result.processing_time = time.time() - start_time
-                    return cached_result
+            start_time = time.time()
             
-            # Préparation de l'image
-            processed_image = self._preprocess_image_for_analysis(eye_image)
-            image_quality = self._assess_image_quality(processed_image)
+            # Préparer l'image pour Gemma 3n
+            processed_image = self._preprocess_image_for_gemma(image_pil)
             
-            # Sélection du backend
-            backend = force_backend or self._select_optimal_backend(image_quality)
+            # Créer le prompt médical spécialisé
+            medical_prompt = self._create_multimodal_prompt(eye_position)
             
-            # Analyse selon le backend
-            if backend == ModelBackend.GOOGLE_AI_EDGE:
-                result = self._analyze_with_google_ai(processed_image, eye_position, image_quality)
-            elif backend == ModelBackend.LOCAL_TRANSFORMERS:
-                result = self._analyze_with_local_model(processed_image, eye_position, image_quality)
+            # Préparer les inputs selon les capacités du modèle
+            if self.processor is not None:
+                # Mode multimodal complet
+                result = self._analyze_with_vision_model(processed_image, medical_prompt)
             else:
-                result = self._analyze_with_simulation(processed_image, eye_position, image_quality)
+                # Mode text-only avec description d'image
+                result = self._analyze_text_only_with_features(processed_image, medical_prompt)
             
-            # Post-traitement et optimisations
-            result = self._post_process_result(result, backend, time.time() - start_time)
-            
-            # Mise en cache
-            if use_cache:
-                self.analysis_cache[cache_key] = result
-            
-            # Métriques
-            self._update_metrics(backend, time.time() - start_time)
+            # Post-traitement
+            result['processing_time'] = time.time() - start_time
+            result['model_type'] = 'gemma3n_multimodal'
+            result['analysis_mode'] = 'vision' if self.processor else 'text_with_cv'
             
             return result
             
         except Exception as e:
-            logger.error(f"❌ Erreur d'analyse: {e}")
-            return self._create_error_result(str(e), time.time() - start_time)
+            logger.error(f"Multimodal analysis failed: {e}")
+            return self._create_fallback_result(f"Analysis error: {e}")
     
-    def _preprocess_image_for_analysis(self, image: Image.Image) -> Image.Image:
-        """Préprocessing avancé pour optimiser l'analyse"""
-        # Conversion en format standard
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
+    def _preprocess_image_for_gemma(self, image_pil: Image.Image) -> Image.Image:
+        """Préprocessing optimisé pour Gemma 3n vision"""
+        # Redimensionner à une taille compatible
+        # Gemma 3n vision attend généralement 224x224 ou 336x336
+        target_size = (336, 336)
         
-        # Redimensionnement optimal pour Gemma
-        target_size = (224, 224)  # Optimisé pour vision models
-        image = image.resize(target_size, Image.Resampling.LANCZOS)
+        # Conserver les proportions avec padding si nécessaire
+        image_pil.thumbnail(target_size, Image.Resampling.LANCZOS)
         
-        # Amélioration de la qualité
-        image_array = np.array(image)
+        # Créer une image carrée avec padding
+        new_image = Image.new('RGB', target_size, (0, 0, 0))
+        paste_x = (target_size[0] - image_pil.width) // 2
+        paste_y = (target_size[1] - image_pil.height) // 2
+        new_image.paste(image_pil, (paste_x, paste_y))
         
-        # Correction gamma pour améliorer le contraste des pupilles
-        gamma = 1.2
-        image_array = np.power(image_array / 255.0, 1/gamma) * 255
-        image_array = np.clip(image_array, 0, 255).astype(np.uint8)
-        
-        # Réduction du bruit tout en préservant les détails
-        image_array = cv2.bilateralFilter(image_array, 9, 75, 75)
-        
-        return Image.fromarray(image_array)
+        return new_image
     
-    def _assess_image_quality(self, image: Image.Image) -> Dict:
-        """Évalue la qualité de l'image pour optimiser l'analyse"""
-        image_array = np.array(image)
-        gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
-        
-        # Métriques de qualité
-        quality_metrics = {
-            'sharpness': cv2.Laplacian(gray, cv2.CV_64F).var(),
-            'brightness': np.mean(gray),
-            'contrast': np.std(gray),
-            'overall_quality': 'good'
-        }
-        
-        # Classification de la qualité
-        if quality_metrics['sharpness'] < 100:
-            quality_metrics['overall_quality'] = 'poor'
-        elif quality_metrics['sharpness'] < 500:
-            quality_metrics['overall_quality'] = 'fair'
-        
-        return quality_metrics
+    def _create_multimodal_prompt(self, eye_position: str) -> str:
+        """Prompt optimisé pour Gemma 3n multimodal"""
+        return f"""<image>
+
+Analyze this eye image for signs of retinoblastoma (leukocoria).
+
+MEDICAL CONTEXT:
+- Retinoblastoma is a serious eye cancer in children
+- Main sign: White pupil reflex (leukocoria) in photos
+- Eye position: {eye_position}
+- Critical for early detection
+
+ANALYSIS REQUIRED:
+1. Examine pupil for white/abnormal coloration
+2. Compare to normal dark pupil appearance
+3. Assess risk level for retinoblastoma
+4. Provide medical recommendations
+
+OUTPUT FORMAT (JSON):
+{{
+    "leukocoria_detected": boolean,
+    "confidence": float (0-100),
+    "risk_level": "low|medium|high", 
+    "pupil_description": "detailed description",
+    "medical_analysis": "clinical reasoning",
+    "recommendations": "medical advice",
+    "urgency": "routine|soon|urgent|immediate"
+}}
+
+Focus on medical accuracy and child safety. Be conservative in assessment."""
     
-    def _select_optimal_backend(self, image_quality: Dict) -> ModelBackend:
-        """Sélectionne le backend optimal selon la qualité de l'image"""
-        if self.backend == ModelBackend.SIMULATION:
-            return ModelBackend.SIMULATION
-        
-        # Pour images de haute qualité, utiliser Google AI si disponible
-        if (image_quality['overall_quality'] == 'good' and 
-            self.backend in [ModelBackend.GOOGLE_AI_EDGE, ModelBackend.HYBRID] and
-            self.google_model is not None):
-            return ModelBackend.GOOGLE_AI_EDGE
-        
-        # Sinon, utiliser le modèle local
-        if self.local_model is not None:
-            return ModelBackend.LOCAL_TRANSFORMERS
-        
-        return ModelBackend.SIMULATION
-    
-    def _analyze_with_google_ai(self, image: Image.Image, eye_position: str, 
-                               image_quality: Dict) -> AnalysisResult:
-        """Analyse avec Google AI Edge"""
+    def _analyze_with_vision_model(self, image: Image.Image, prompt: str) -> Dict:
+        """Analyse avec les capacités vision complètes"""
         try:
-            # Conversion de l'image pour Google AI
-            img_byte_arr = io.BytesIO()
-            image.save(img_byte_arr, format='JPEG', quality=95)
-            img_byte_arr = img_byte_arr.getvalue()
-            
-            # Prompt contextualisé
-            prompt = self.medical_prompts["analysis"].format(
-                eye_position=eye_position,
-                image_quality=image_quality['overall_quality']
-            )
-            
-            # Requête à Google AI
-            response = self.google_model.generate_content([
-                prompt,
-                {
-                    "mime_type": "image/jpeg",
-                    "data": img_byte_arr
-                }
-            ])
-            
-            # Parsing de la réponse JSON
-            result_dict = json.loads(response.text)
-            
-            return AnalysisResult(
-                leukocoria_detected=result_dict['leukocoria_detected'],
-                confidence=result_dict['confidence'],
-                risk_level=result_dict['risk_level'],
-                pupil_color=result_dict['pupil_color'],
-                description=result_dict['description'],
-                recommendations=result_dict['recommendations'],
-                processing_time=0,  # Sera mis à jour
-                model_backend="google_ai_edge",
-                technical_details=result_dict.get('technical_details', {})
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur Google AI: {e}")
-            # Fallback vers le modèle local
-            return self._analyze_with_local_model(image, eye_position, image_quality)
-    
-    def _analyze_with_local_model(self, image: Image.Image, eye_position: str,
-                                 image_quality: Dict) -> AnalysisResult:
-        """Analyse avec le modèle local Transformers"""
-        try:
-            # Prompt pour le modèle local
-            prompt = f"""<|system|>
-{self.medical_prompts['system']}
-
-<|user|>
-{self.medical_prompts['analysis'].format(
-    eye_position=eye_position,
-    image_quality=image_quality['overall_quality']
-)}
-
-<|assistant|>"""
-
-            # Tokenisation
-            inputs = self.local_tokenizer(
-                prompt,
+            # Préparer les inputs multimodaux
+            inputs = self.processor(
+                text=prompt,
+                images=image,
                 return_tensors="pt",
-                truncation=True,
-                max_length=2048
+                padding=True
             ).to(self.device)
             
-            # Génération avec paramètres optimisés
+            # Génération avec paramètres optimisés pour médical
             with torch.no_grad():
-                outputs = self.local_model.generate(
+                outputs = self.model.generate(
                     **inputs,
                     max_new_tokens=512,
-                    temperature=0.1,
+                    temperature=0.1,  # Très faible pour précision médicale
                     do_sample=True,
-                    top_p=0.8,
-                    top_k=20,
-                    pad_token_id=self.local_tokenizer.eos_token_id,
-                    eos_token_id=self.local_tokenizer.eos_token_id
+                    top_p=0.9,
+                    top_k=40,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id
                 )
             
-            # Décodage de la réponse
-            response = self.local_tokenizer.decode(
+            # Décoder la réponse
+            response_text = self.tokenizer.decode(
                 outputs[0][inputs['input_ids'].shape[1]:],
                 skip_special_tokens=True
             )
             
-            # Extraction du JSON
-            result_dict = self._extract_json_from_response(response)
+            # Parser la réponse JSON
+            result = self._parse_medical_response(response_text)
+            result['analysis_method'] = 'multimodal_vision'
             
-            return AnalysisResult(
-                leukocoria_detected=result_dict.get('leukocoria_detected', False),
-                confidence=result_dict.get('confidence', 50.0),
-                risk_level=result_dict.get('risk_level', 'medium'),
-                pupil_color=result_dict.get('pupil_color', 'uncertain'),
-                description=result_dict.get('description', 'Local model analysis'),
-                recommendations=result_dict.get('recommendations', 'Consult ophthalmologist'),
-                processing_time=0,
-                model_backend="local_transformers",
-                technical_details=result_dict.get('technical_details', {})
-            )
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Erreur modèle local: {e}")
-            return self._analyze_with_simulation(image, eye_position, image_quality)
+            logger.error(f"Vision model analysis failed: {e}")
+            return self._analyze_text_only_with_features(image, prompt)
     
-    def _analyze_with_simulation(self, image: Image.Image, eye_position: str,
-                                image_quality: Dict) -> AnalysisResult:
-        """Analyse de simulation avancée basée sur computer vision"""
-        # Analyse basique mais sophistiquée
-        image_array = np.array(image)
-        gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
-        
-        # Détection de la région pupillaire
-        circles = cv2.HoughCircles(
-            gray, cv2.HOUGH_GRADIENT, 1, 20,
-            param1=50, param2=30, minRadius=5, maxRadius=50
-        )
-        
-        confidence = 40.0
-        detected = False
-        pupil_color = "dark"
-        description = f"Computer vision analysis of {eye_position} eye"
-        
-        if circles is not None:
-            circles = np.round(circles[0, :]).astype("int")
-            for (x, y, r) in circles[:1]:  # Premier cercle détecté
-                # Analyse de la région pupillaire
-                mask = np.zeros(gray.shape, dtype=np.uint8)
-                cv2.circle(mask, (x, y), r, 255, -1)
-                pupil_region = cv2.bitwise_and(gray, gray, mask=mask)
-                
-                # Calculs de luminosité et contraste
-                brightness = np.mean(pupil_region[pupil_region > 0])
-                std_brightness = np.std(pupil_region[pupil_region > 0])
-                
-                # Heuristique sophistiquée
-                brightness_score = min(100, max(0, (brightness - 80) / 175 * 100))
-                contrast_score = min(100, max(0, std_brightness / 50 * 100))
-                
-                # Score composite
-                composite_score = (brightness_score * 0.7 + contrast_score * 0.3)
-                
-                # Ajustements selon la qualité de l'image
-                quality_modifier = {
-                    'poor': 0.6,
-                    'fair': 0.8,
-                    'good': 1.0
-                }.get(image_quality['overall_quality'], 0.8)
-                
-                confidence = min(95, composite_score * quality_modifier)
-                detected = confidence > 50
-                
-                if detected:
-                    pupil_color = "bright/white" if brightness > 120 else "grayish"
-                    description = f"Potential leukocoria detected in {eye_position} eye (brightness: {brightness:.1f})"
-                else:
-                    pupil_color = "normal/dark"
-                    description = f"Normal pupil appearance in {eye_position} eye"
-                
-                break
-        
-        # Détermination du niveau de risque
-        if confidence > 75:
-            risk_level = "high"
-            recommendations = "URGENT: Immediate ophthalmological consultation required"
-        elif confidence > 50:
-            risk_level = "medium"
-            recommendations = "Recommended: Schedule ophthalmologist appointment within 1-2 weeks"
-        else:
-            risk_level = "low"
-            recommendations = "Continue regular monitoring, routine eye exams as scheduled"
-        
-        return AnalysisResult(
-            leukocoria_detected=detected,
-            confidence=confidence,
-            risk_level=risk_level,
-            pupil_color=pupil_color,
-            description=description,
-            recommendations=recommendations,
-            processing_time=0,
-            model_backend="simulation_cv",
-            technical_details={
-                "brightness": float(brightness) if 'brightness' in locals() else 0,
-                "image_quality": image_quality,
-                "detection_method": "hough_circles",
-                "circles_detected": len(circles[0]) if circles is not None else 0
-            }
-        )
-    
-    def _extract_json_from_response(self, response: str) -> Dict:
-        """Extrait le JSON de la réponse du modèle"""
+    def _analyze_text_only_with_features(self, image: Image.Image, prompt: str) -> Dict:
+        """Analyse text-only avec features CV en input"""
         try:
-            # Chercher le JSON dans la réponse
-            start_idx = response.find('{')
-            end_idx = response.rfind('}') + 1
+            # Extraire des features visuelles détaillées
+            visual_features = self._extract_detailed_visual_features(image)
+            
+            # Créer un prompt enrichi avec les features
+            enhanced_prompt = f"""{prompt}
+
+VISUAL ANALYSIS DATA:
+{visual_features}
+
+Based on these visual characteristics and medical knowledge, provide the JSON analysis."""
+            
+            # Tokeniser
+            inputs = self.tokenizer(
+                enhanced_prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=2048,
+                padding=True
+            ).to(self.device)
+            
+            # Génération
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    temperature=0.1,
+                    do_sample=True,
+                    top_p=0.9,
+                    top_k=40,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id
+                )
+            
+            # Décoder
+            response_text = self.tokenizer.decode(
+                outputs[0][inputs['input_ids'].shape[1]:],
+                skip_special_tokens=True
+            )
+            
+            # Parser
+            result = self._parse_medical_response(response_text)
+            result['analysis_method'] = 'text_with_cv_features'
+            result['visual_features'] = visual_features
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Text analysis failed: {e}")
+            return self._create_fallback_result(f"Text analysis error: {e}")
+    
+    def _extract_detailed_visual_features(self, image: Image.Image) -> str:
+        """Extraction de features visuelles détaillées pour l'IA"""
+        try:
+            import cv2
+            
+            # Convertir en array numpy
+            image_array = np.array(image)
+            gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+            
+            # Analyses avancées
+            features = {
+                "brightness_stats": {
+                    "mean": float(np.mean(gray)),
+                    "std": float(np.std(gray)),
+                    "min": float(np.min(gray)),
+                    "max": float(np.max(gray))
+                },
+                "image_properties": {
+                    "width": image.width,
+                    "height": image.height,
+                    "aspect_ratio": image.width / image.height
+                }
+            }
+            
+            # Détection de cercles (pupilles)
+            circles = cv2.HoughCircles(
+                gray, cv2.HOUGH_GRADIENT, 1, 20,
+                param1=50, param2=30, minRadius=5, maxRadius=min(gray.shape)//3
+            )
+            
+            if circles is not None:
+                circles = np.round(circles[0, :]).astype("int")
+                features["pupil_detection"] = {
+                    "circles_found": len(circles),
+                    "analysis": []
+                }
+                
+                # Analyser chaque cercle détecté
+                for i, (x, y, r) in enumerate(circles[:3]):  # Max 3 cercles
+                    # Région pupillaire
+                    mask = np.zeros(gray.shape, dtype=np.uint8)
+                    cv2.circle(mask, (x, y), r, 255, -1)
+                    pupil_region = gray[mask > 0]
+                    
+                    if len(pupil_region) > 0:
+                        pupil_brightness = float(np.mean(pupil_region))
+                        pupil_contrast = float(np.std(pupil_region))
+                        
+                        # Score de leucocorie
+                        global_brightness = features["brightness_stats"]["mean"]
+                        brightness_ratio = pupil_brightness / max(global_brightness, 1)
+                        
+                        leukocoria_score = 0
+                        if brightness_ratio > 1.3:  # Pupille plus claire que moyenne
+                            leukocoria_score = min(100, (brightness_ratio - 1) * 100)
+                        
+                        circle_analysis = {
+                            "position": f"({x}, {y})",
+                            "radius": int(r),
+                            "brightness": pupil_brightness,
+                            "contrast": pupil_contrast,
+                            "brightness_ratio": brightness_ratio,
+                            "leukocoria_score": leukocoria_score,
+                            "assessment": self._assess_pupil_brightness(pupil_brightness, global_brightness)
+                        }
+                        
+                        features["pupil_detection"]["analysis"].append(circle_analysis)
+            else:
+                features["pupil_detection"] = {
+                    "circles_found": 0,
+                    "note": "No circular structures detected"
+                }
+            
+            # Analyse de texture
+            # Gradient pour détecter les contours
+            grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+            gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+            
+            features["texture_analysis"] = {
+                "edge_density": float(np.mean(gradient_magnitude)),
+                "edge_variation": float(np.std(gradient_magnitude))
+            }
+            
+            # Analyse de régions claires (potentielle leucocorie)
+            bright_threshold = np.percentile(gray, 85)  # 15% des pixels les plus clairs
+            bright_regions = gray > bright_threshold
+            bright_area_ratio = np.sum(bright_regions) / gray.size
+            
+            features["brightness_analysis"] = {
+                "bright_threshold": float(bright_threshold),
+                "bright_area_percentage": float(bright_area_ratio * 100),
+                "max_bright_value": float(np.max(gray)),
+                "bright_regions_assessment": self._assess_brightness_pattern(bright_area_ratio, bright_threshold)
+            }
+            
+            # Créer une description textuelle structurée
+            description = f"""
+VISUAL ANALYSIS REPORT:
+=======================
+
+IMAGE PROPERTIES:
+- Dimensions: {features['image_properties']['width']}x{features['image_properties']['height']}
+- Aspect ratio: {features['image_properties']['aspect_ratio']:.2f}
+
+BRIGHTNESS ANALYSIS:
+- Overall brightness: {features['brightness_stats']['mean']:.1f} (std: {features['brightness_stats']['std']:.1f})
+- Range: {features['brightness_stats']['min']:.0f} - {features['brightness_stats']['max']:.0f}
+- Bright regions: {features['brightness_analysis']['bright_area_percentage']:.1f}%
+- Assessment: {features['brightness_analysis']['bright_regions_assessment']}
+
+PUPIL DETECTION:
+- Circular structures found: {features['pupil_detection']['circles_found']}"""
+            
+            if features['pupil_detection']['circles_found'] > 0:
+                for i, analysis in enumerate(features['pupil_detection']['analysis']):
+                    description += f"""
+- Pupil {i+1}: Position {analysis['position']}, Radius {analysis['radius']}px
+  - Brightness: {analysis['brightness']:.1f} (ratio: {analysis['brightness_ratio']:.2f})
+  - Leukocoria score: {analysis['leukocoria_score']:.1f}/100
+  - Assessment: {analysis['assessment']}"""
+            else:
+                description += "\n- No clear pupil structures detected"
+            
+            description += f"""
+
+TEXTURE ANALYSIS:
+- Edge density: {features['texture_analysis']['edge_density']:.1f}
+- Edge variation: {features['texture_analysis']['edge_variation']:.1f}
+
+MEDICAL SIGNIFICANCE:
+- High leukocoria scores (>50) may indicate white pupil reflex
+- Bright pupils compared to surrounding areas are concerning
+- Multiple circular structures may indicate both eyes visible"""
+            
+            return description
+            
+        except Exception as e:
+            logger.error(f"Feature extraction failed: {e}")
+            return f"Feature extraction failed: {e}"
+    
+    def _assess_pupil_brightness(self, pupil_brightness: float, global_brightness: float) -> str:
+        """Évalue la luminosité pupillaire"""
+        ratio = pupil_brightness / max(global_brightness, 1)
+        
+        if ratio > 1.5:
+            return "VERY BRIGHT - High concern for leukocoria"
+        elif ratio > 1.3:
+            return "BRIGHT - Moderate concern for leukocoria"
+        elif ratio > 1.1:
+            return "SLIGHTLY BRIGHT - Monitor for changes"
+        else:
+            return "NORMAL - Dark pupil as expected"
+    
+    def _assess_brightness_pattern(self, bright_ratio: float, threshold: float) -> str:
+        """Évalue le pattern de luminosité globale"""
+        if bright_ratio > 0.3:
+            return "Large bright areas detected - possible flash reflection or leukocoria"
+        elif bright_ratio > 0.15:
+            return "Moderate bright areas - could indicate abnormal reflection"
+        elif bright_ratio > 0.05:
+            return "Small bright areas - normal flash reflection likely"
+        else:
+            return "Minimal bright areas - low lighting conditions"
+    
+    def _parse_medical_response(self, response_text: str) -> Dict:
+        """Parse la réponse médicale avec fallbacks robustes"""
+        try:
+            # Nettoyer et chercher JSON
+            text = response_text.strip()
+            start_idx = text.find('{')
+            end_idx = text.rfind('}') + 1
             
             if start_idx != -1 and end_idx != -1:
-                json_str = response[start_idx:end_idx]
-                return json.loads(json_str)
+                json_str = text[start_idx:end_idx]
+                result = json.loads(json_str)
+                
+                # Validation et nettoyage
+                result['leukocoria_detected'] = bool(result.get('leukocoria_detected', False))
+                result['confidence'] = max(0, min(100, float(result.get('confidence', 50))))
+                
+                if result.get('risk_level') not in ['low', 'medium', 'high']:
+                    result['risk_level'] = 'medium'
+                
+                if result.get('urgency') not in ['routine', 'soon', 'urgent', 'immediate']:
+                    result['urgency'] = 'soon'
+                
+                return result
             else:
-                # Fallback: parser la réponse texte
-                return self._parse_text_response(response)
+                raise ValueError("No JSON found")
                 
-        except json.JSONDecodeError:
-            return self._parse_text_response(response)
-    
-    def _parse_text_response(self, response: str) -> Dict:
-        """Parse une réponse texte quand le JSON échoue"""
-        # Analyse basique du texte pour extraire les informations
-        response_lower = response.lower()
-        
-        detected = any(word in response_lower for word in ['white', 'bright', 'leukocoria', 'abnormal'])
-        confidence = 60.0 if detected else 40.0
-        
-        return {
-            'leukocoria_detected': detected,
-            'confidence': confidence,
-            'risk_level': 'medium' if detected else 'low',
-            'pupil_color': 'uncertain',
-            'description': 'Text-based analysis from model response',
-            'recommendations': 'Professional evaluation recommended',
-            'technical_details': {'parsing_method': 'text_fallback'}
-        }
-    
-    def _post_process_result(self, result: AnalysisResult, backend: ModelBackend, 
-                           processing_time: float) -> AnalysisResult:
-        """Post-traitement des résultats avec optimisations"""
-        # Mise à jour du temps de traitement
-        result.processing_time = processing_time
-        result.model_backend = backend.value
-        
-        # Validation et correction des valeurs
-        result.confidence = max(0, min(100, result.confidence))
-        
-        if result.risk_level not in ['low', 'medium', 'high']:
-            result.risk_level = 'medium'
-        
-        # Enrichissement avec des métadonnées
-        if result.technical_details is None:
-            result.technical_details = {}
-        
-        result.technical_details.update({
-            'backend_used': backend.value,
-            'processing_time_ms': round(processing_time * 1000, 2),
-            'device': str(self.device),
-            'timestamp': time.time()
-        })
-        
-        return result
-    
-    def _create_error_result(self, error_message: str, processing_time: float) -> AnalysisResult:
-        """Crée un résultat d'erreur standardisé"""
-        return AnalysisResult(
-            leukocoria_detected=False,
-            confidence=0.0,
-            risk_level='unknown',
-            pupil_color='error',
-            description=f"Analysis error: {error_message}",
-            recommendations="Unable to analyze - please retry or consult professional",
-            processing_time=processing_time,
-            model_backend='error',
-            technical_details={'error': error_message}
-        )
-    
-    def _generate_cache_key(self, image: Image.Image, eye_position: str) -> str:
-        """Génère une clé de cache basée sur l'image"""
-        # Hash de l'image pour le cache
-        import hashlib
-        img_bytes = io.BytesIO()
-        image.save(img_bytes, format='PNG')
-        img_hash = hashlib.md5(img_bytes.getvalue()).hexdigest()
-        return f"{img_hash}_{eye_position}"
-    
-    def _update_metrics(self, backend: ModelBackend, processing_time: float):
-        """Met à jour les métriques de performance"""
-        self.performance_metrics['total_analyses'] += 1
-        self.performance_metrics['backend_usage'][backend.value] += 1
-        
-        # Moyenne mobile du temps de traitement
-        total = self.performance_metrics['total_analyses']
-        current_avg = self.performance_metrics['average_processing_time']
-        self.performance_metrics['average_processing_time'] = (
-            (current_avg * (total - 1) + processing_time) / total
-        )
-    
-    def batch_analyze_individual(self, eye_regions: List[Tuple[Image.Image, str, str]], 
-                               individual_id: str = None) -> Dict:
-        """
-        Analyse en lot pour un individu avec détection de cohérence
-        
-        Args:
-            eye_regions: Liste de (image, position, timestamp)
-            individual_id: ID de l'individu pour suivi
+        except Exception as e:
+            logger.warning(f"JSON parsing failed: {e}")
             
-        Returns:
-            Analyse complète avec cohérence temporelle
-        """
-        start_time = time.time()
-        logger.info(f"🔄 Analyse en lot: {len(eye_regions)} images pour individu {individual_id}")
-        
-        results = []
-        consistency_scores = {'left': [], 'right': []}
-        
-        # Analyser chaque région
-        for i, (eye_image, position, timestamp) in enumerate(eye_regions):
-            logger.info(f"  📊 Analyse {i+1}/{len(eye_regions)}: {position} eye")
+            # Fallback: analyse textuelle
+            detected = any(word in response_text.lower() 
+                         for word in ['leukocoria', 'white', 'bright', 'abnormal', 'concerning'])
             
-            result = self.analyze_eye_region(
-                eye_image, position, use_cache=True
-            )
+            confidence = 70 if detected else 30
             
-            results.append({
-                'timestamp': timestamp,
-                'position': position,
-                'result': result
-            })
-            
-            # Collecter pour analyse de cohérence
-            if result.leukocoria_detected:
-                consistency_scores[position].append(result.confidence)
-        
-        # Analyse de cohérence
-        coherence_analysis = self._analyze_temporal_coherence(results)
-        
-        # Synthèse finale
-        batch_summary = {
-            'individual_id': individual_id,
-            'total_images': len(eye_regions),
-            'processing_time': time.time() - start_time,
-            'results': results,
-            'coherence_analysis': coherence_analysis,
-            'final_recommendation': self._generate_batch_recommendation(coherence_analysis)
-        }
-        
-        logger.info(f"✅ Analyse en lot terminée: {batch_summary['final_recommendation']['urgency']}")
-        return batch_summary
-    
-    def _analyze_temporal_coherence(self, results: List[Dict]) -> Dict:
-        """Analyse la cohérence temporelle des détections"""
-        coherence = {
-            'left_eye': {'detections': 0, 'total': 0, 'avg_confidence': 0},
-            'right_eye': {'detections': 0, 'total': 0, 'avg_confidence': 0},
-            'overall_consistency': 0,
-            'trend_analysis': 'stable'
-        }
-        
-        # Analyser par position
-        for eye_position in ['left', 'right']:
-            eye_results = [r for r in results if r['position'] == eye_position]
-            
-            if eye_results:
-                detections = sum(1 for r in eye_results if r['result'].leukocoria_detected)
-                confidences = [r['result'].confidence for r in eye_results if r['result'].leukocoria_detected]
-                
-                coherence[f'{eye_position}_eye'] = {
-                    'detections': detections,
-                    'total': len(eye_results),
-                    'detection_rate': detections / len(eye_results),
-                    'avg_confidence': np.mean(confidences) if confidences else 0,
-                    'consistency_score': (detections / len(eye_results)) * 100
-                }
-        
-        # Score de cohérence global
-        left_consistency = coherence['left_eye'].get('consistency_score', 0)
-        right_consistency = coherence['right_eye'].get('consistency_score', 0)
-        coherence['overall_consistency'] = max(left_consistency, right_consistency)
-        
-        # Analyse de tendance (simple)
-        if coherence['overall_consistency'] > 60:
-            coherence['trend_analysis'] = 'concerning_persistent'
-        elif coherence['overall_consistency'] > 30:
-            coherence['trend_analysis'] = 'intermittent_findings'
-        else:
-            coherence['trend_analysis'] = 'minimal_findings'
-        
-        return coherence
-    
-    def _generate_batch_recommendation(self, coherence: Dict) -> Dict:
-        """Génère une recommandation basée sur l'analyse de cohérence"""
-        consistency = coherence['overall_consistency']
-        trend = coherence['trend_analysis']
-        
-        if consistency > 70:
-            urgency = "URGENT"
-            timeframe = "immediate (within 24-48 hours)"
-            reason = "Highly consistent leukocoria detection across multiple images"
-        elif consistency > 40:
-            urgency = "HIGH"
-            timeframe = "within 1 week"
-            reason = "Moderately consistent findings requiring professional evaluation"
-        elif consistency > 15:
-            urgency = "MODERATE"
-            timeframe = "within 2-4 weeks"
-            reason = "Some concerning findings detected"
-        else:
-            urgency = "LOW"
-            timeframe = "routine follow-up"
-            reason = "Minimal or no concerning findings"
-        
-        return {
-            'urgency': urgency,
-            'timeframe': timeframe,
-            'reason': reason,
-            'consistency_score': consistency,
-            'medical_action': f"Schedule ophthalmological consultation {timeframe}",
-            'additional_notes': self._get_additional_medical_notes(coherence)
-        }
-    
-    def _get_additional_medical_notes(self, coherence: Dict) -> List[str]:
-        """Génère des notes médicales supplémentaires"""
-        notes = []
-        
-        left_rate = coherence['left_eye'].get('detection_rate', 0)
-        right_rate = coherence['right_eye'].get('detection_rate', 0)
-        
-        if left_rate > 0.5 and right_rate > 0.5:
-            notes.append("Bilateral findings detected - higher priority for evaluation")
-        elif left_rate > 0.5 or right_rate > 0.5:
-            notes.append("Unilateral findings - document which eye is affected")
-        
-        if coherence['trend_analysis'] == 'concerning_persistent':
-            notes.append("Persistent findings across multiple timepoints")
-        
-        notes.append("Continue photo documentation until professional evaluation")
-        notes.append("This is a screening tool - professional diagnosis required")
-        
-        return notes
-    
-    def get_performance_report(self) -> Dict:
-        """Retourne un rapport de performance détaillé"""
-        return {
-            'system_info': {
-                'backend': self.backend.value,
-                'device': str(self.device),
-                'cuda_available': torch.cuda.is_available(),
-                'google_ai_available': GOOGLE_AI_AVAILABLE and self.google_model is not None,
-                'local_model_available': self.local_model is not None
-            },
-            'performance_metrics': self.performance_metrics.copy(),
-            'cache_info': {
-                'cache_size': len(self.analysis_cache),
-                'hit_rate': (self.performance_metrics['cache_hits'] / 
-                           max(1, self.performance_metrics['total_analyses'])) * 100
-            },
-            'optimization_suggestions': self._get_optimization_suggestions()
-        }
-    
-    def _get_optimization_suggestions(self) -> List[str]:
-        """Génère des suggestions d'optimisation"""
-        suggestions = []
-        
-        if self.performance_metrics['average_processing_time'] > 5:
-            suggestions.append("Consider enabling CUDA acceleration if available")
-        
-        if self.performance_metrics['cache_hits'] < self.performance_metrics['total_analyses'] * 0.2:
-            suggestions.append("Low cache hit rate - consider analyzing similar images in batches")
-        
-        if self.backend == ModelBackend.SIMULATION:
-            suggestions.append("Install Google AI or local Gemma model for improved accuracy")
-        
-        return suggestions
-    
-    def clear_cache(self):
-        """Vide le cache d'analyse"""
-        cache_size = len(self.analysis_cache)
-        self.analysis_cache.clear()
-        logger.info(f"🗑️ Cache vidé: {cache_size} entrées supprimées")
-    
-    def optimize_for_mobile(self):
-        """Optimisations spécifiques pour mobile/edge"""
-        if self.local_model is not None:
-            # Quantification du modèle pour réduire la taille
-            try:
-                from torch.quantization import quantize_dynamic
-                self.local_model = quantize_dynamic(
-                    self.local_model, {torch.nn.Linear}, dtype=torch.qint8
-                )
-                logger.info("✅ Modèle quantifié pour optimisation mobile")
-            except Exception as e:
-                logger.warning(f"⚠️ Quantification échouée: {e}")
-        
-        # Réduire la taille du cache
-        if len(self.analysis_cache) > 100:
-            # Garder seulement les 50 entrées les plus récentes
-            sorted_cache = sorted(
-                self.analysis_cache.items(),
-                key=lambda x: x[1].technical_details.get('timestamp', 0),
-                reverse=True
-            )
-            self.analysis_cache = dict(sorted_cache[:50])
-            logger.info("🔧 Cache optimisé pour mobile")
-    
-    def export_analysis_data(self, filepath: str):
-        """Exporte les données d'analyse pour recherche"""
-        export_data = {
-            'performance_metrics': self.performance_metrics,
-            'system_info': {
-                'backend': self.backend.value,
-                'device': str(self.device),
-                'timestamp': time.time()
-            },
-            'cache_summary': {
-                'total_entries': len(self.analysis_cache),
-                'hit_rate': (self.performance_metrics['cache_hits'] / 
-                           max(1, self.performance_metrics['total_analyses']))
+            return {
+                'leukocoria_detected': detected,
+                'confidence': confidence,
+                'risk_level': 'medium' if detected else 'low',
+                'pupil_description': 'AI text analysis based fallback',
+                'medical_analysis': f'Text analysis: {response_text[:200]}...',
+                'recommendations': 'Professional evaluation recommended' if detected else 'Continue monitoring',
+                'urgency': 'urgent' if detected else 'routine',
+                'parsing_method': 'text_fallback'
             }
-        }
-        
-        with open(filepath, 'w') as f:
-            json.dump(export_data, f, indent=2, default=str)
-        
-        logger.info(f"📊 Données exportées: {filepath}")
     
-    def __del__(self):
-        """Nettoyage lors de la destruction"""
-        if hasattr(self, 'local_model') and self.local_model is not None:
-            del self.local_model
-        if hasattr(self, 'local_tokenizer') and self.local_tokenizer is not None:
-            del self.local_tokenizer
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    def _create_fallback_result(self, error_msg: str) -> Dict:
+        """Résultat de fallback en cas d'erreur"""
+        return {
+            'leukocoria_detected': False,
+            'confidence': 0,
+            'risk_level': 'unknown',
+            'pupil_description': 'Analysis failed',
+            'medical_analysis': error_msg,
+            'recommendations': 'Manual professional evaluation required',
+            'urgency': 'soon',
+            'error': error_msg,
+            'analysis_method': 'fallback'
+        }
+    
+    def get_memory_usage(self) -> Dict:
+        """Retourne l'usage mémoire actuel"""
+        memory_info = {}
+        
+        if torch.cuda.is_available():
+            memory_info['gpu_allocated'] = torch.cuda.memory_allocated() / 1024**3
+            memory_info['gpu_reserved'] = torch.cuda.memory_reserved() / 1024**3
+            memory_info['gpu_max_allocated'] = torch.cuda.max_memory_allocated() / 1024**3
+        
+        return memory_info
+    
+    def cleanup_memory(self):
+        """Nettoie la mémoire GPU"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        logger.info("GPU memory cleaned")
