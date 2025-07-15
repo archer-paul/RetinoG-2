@@ -306,13 +306,21 @@ class GemmaHandlerV2:
             # Créer le prompt médical spécialisé
             prompt = self._create_medical_prompt(region_type)
             
-            # Préparer les inputs
-            inputs = self.processor(
-                text=prompt,
-                images=image,
-                return_tensors="pt",
-                padding=True
-            ).to(self.device)
+            # Préparer les inputs pour Gemma 3n
+            if hasattr(self.processor, 'process'):
+                inputs = self.processor.process(
+                    images=[image],
+                    text=prompt,
+                    return_tensors="pt"
+                ).to(self.device)
+            else:
+                # Fallback pour d'autres versions du processor
+                inputs = self.processor(
+                    images=[image],
+                    text=prompt,
+                    return_tensors="pt",
+                    padding=True
+                ).to(self.device)
             
             # Génération avec paramètres médicaux optimisés
             with torch.no_grad():
@@ -422,14 +430,10 @@ OUTPUT FORMAT (JSON):
 IMPORTANT: Be conservative and prioritize child safety. When in doubt, recommend medical evaluation."""
 
     def _create_medical_prompt(self, region_type: str) -> str:
-        """Crée un prompt médical spécialisé pour l'analyse multimodale en utilisant le template de chat."""
-        # Structure de message pour les modèles de chat multimodaux
-        chat = [
-            {"role": "user", "content": f"<image>\n{self._get_base_prompt_text(region_type)}"},
-        ]
-        # Le tokenizer va ajouter les tokens de début/fin, les rôles, etc.
-        prompt = self.tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
-        return prompt
+        """Crée un prompt médical spécialisé pour l'analyse multimodale."""
+        # Pour Gemma 3n, utiliser directement le texte sans tokens d'image spéciaux
+        return self._get_base_prompt_text(region_type)
+    
     
     def _create_enhanced_text_prompt(self, region_type: str, visual_features: str) -> str:
         """Crée un prompt enrichi avec features visuelles pour mode text-only"""

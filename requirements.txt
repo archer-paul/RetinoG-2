@@ -40,6 +40,7 @@ flake8>=6.0.0
 # Gemma 3n optimizations
 timm>=1.0.17
 safetensors>=0.4.0
+bitsanbytes>=0.46.1
 
 # Mobile optimizations (pour déploiement futur)
 # onnx>=1.14.0
